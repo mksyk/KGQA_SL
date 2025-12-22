@@ -487,11 +487,20 @@ def main_page():
                         top_k = app_config.KG_TOP_K
                         similarity_threshold = app_config.KG_SIMILARITY_THRESHOLD
                         
+                        # 获取rerank配置
+                        enable_rerank = app_config.KG_ENABLE_RERANK
+                        rerank_top_n = app_config.KG_RERANK_TOP_N
+                        rerank_threshold = app_config.KG_RERANK_THRESHOLD
+                        
                         kg_retriever = get_kg_retriever()
                         kg_results = kg_retriever.retrieve_knowledge(
                             entities, 
                             top_k=top_k, 
-                            similarity_threshold=similarity_threshold
+                            similarity_threshold=similarity_threshold,
+                            enable_rerank=enable_rerank,
+                            query=query,  # 传入用户查询用于rerank
+                            rerank_top_n=rerank_top_n,
+                            rerank_threshold=rerank_threshold
                         )
                     except Exception as e:
                         import traceback

@@ -26,3 +26,9 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 KG_TOP_K = int(os.environ.get("KG_TOP_K", "5"))  # 每个实体返回的最相似节点数量
 KG_SIMILARITY_THRESHOLD = float(os.environ.get("KG_SIMILARITY_THRESHOLD", "0.5"))  # 相似度阈值
 
+# 三元组Rerank配置
+KG_ENABLE_RERANK = os.environ.get("KG_ENABLE_RERANK", "true").lower() == "true"  # 是否启用三元组rerank
+KG_RERANK_TOP_N = int(os.environ.get("KG_RERANK_TOP_N", "5"))  # rerank后每个实体返回的最相关三元组数量
+KG_RERANK_THRESHOLD = float(os.environ.get("KG_RERANK_THRESHOLD", "0.0"))  # rerank相似度阈值
+KG_RERANK_MODEL = os.environ.get("KG_RERANK_MODEL", "bge-m3")  # rerank使用的embedding模型名称
+

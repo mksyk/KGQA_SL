@@ -222,7 +222,11 @@ class KnowledgeGraphRetriever:
             return {}
     
     def retrieve_knowledge(self, entities: List[Dict[str, str]], top_k: int = 5, 
-                          similarity_threshold: float = 0.5) -> Dict[str, Any]:
+                          similarity_threshold: float = 0.5, 
+                          enable_rerank: bool = False,
+                          query: str = "",
+                          rerank_top_n: int = 5,
+                          rerank_threshold: float = 0.0) -> Dict[str, Any]:
         """
         为多个实体检索知识图谱信息
         
@@ -230,6 +234,10 @@ class KnowledgeGraphRetriever:
             entities: 实体列表，每个实体包含 text 和 label
             top_k: 每个实体返回的最相似节点数量
             similarity_threshold: 相似度阈值
+            enable_rerank: 是否启用三元组rerank功能（默认False，保持向后兼容）
+            query: 用户查询文本（用于rerank，仅在enable_rerank=True时使用）
+            rerank_top_n: rerank后每个实体返回的最相关三元组数量（仅在enable_rerank=True时使用）
+            rerank_threshold: rerank相似度阈值（仅在enable_rerank=True时使用）
             
         Returns:
             包含检索结果的字典
@@ -270,6 +278,22 @@ class KnowledgeGraphRetriever:
             results["entities"].append(entity_result)
             if enriched_nodes:
                 results["total_matched"] += 1
+        
+        # 如果启用rerank，对结果进行重排序
+        if enable_rerank and query:
+            try:
+                from triple_reranker import get_reranker
+                reranker = get_reranker()
+                results = reranker.rerank_kg_results(
+                    query=query,
+                    kg_results=results,
+                    top_n_per_entity=rerank_top_n,
+                    similarity_threshold=rerank_threshold
+                )
+                logger.info("已对知识图谱检索结果进行rerank")
+            except Exception as e:
+                logger.error(f"rerank失败，返回原始结果: {e}", exc_info=True)
+                # rerank失败时返回原始结果，不影响主流程
         
         return results
 
