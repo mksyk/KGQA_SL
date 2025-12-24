@@ -17,10 +17,10 @@ import config as app_config
 
 # Dify API 配置 - 可以配置多个工作流
 WORKFLOWS = {
-    "testflow": {
-        "url": os.environ.get("DIFY_API_URL", "http://172.25.219.127/v1/chat-messages"),
-        "key": os.environ.get("DIFY_API_KEY", "app-LUFceHJWRbUuhGBDD96VIsJX"),
-    },
+    # "testflow": {
+    #     "url": os.environ.get("DIFY_API_URL", "http://172.25.219.127/v1/chat-messages"),
+    #     "key": os.environ.get("DIFY_API_KEY", "app-LUFceHJWRbUuhGBDD96VIsJX"),
+    # },
     "agentflow1": {
         "url": os.environ.get("DIFY_API_URL", "http://172.25.219.127/v1/chat-messages"),
         "key": os.environ.get("DIFY_API_KEY", "app-is4ADPVdQhq5ArvSlm5CJty3"),
@@ -265,7 +265,7 @@ def register_page():
     
     with st.form("register_form"):
         username = st.text_input("用户名", placeholder="请输入用户名")
-        password = st.text_input("密码", type="password", placeholder="请输入密码（至少6位）")
+        password = st.text_input("密码", type="password", placeholder="请输入密码")
         confirm_password = st.text_input("确认密码", type="password", placeholder="请再次输入密码")
         submit = st.form_submit_button("注册", use_container_width=True)
         
@@ -276,8 +276,9 @@ def register_page():
             
             if not username or not password:
                 st.error("用户名和密码不能为空。")
-            elif len(password) < 6:
-                st.error("密码长度至少为6位")
+            # 已移除密码长度限制：原限制为至少6位，现允许任意长度
+            # elif len(password) < 6:
+            #     st.error("密码长度至少为6位")
             elif password != confirm_password:
                 st.error("两次输入的密码不一致")
             elif username in credentials:
@@ -460,21 +461,25 @@ def main_page():
     query = st.chat_input("输入您的问题...")
     
     if query:
-        # 添加用户消息
-        current_window["messages"].append({"role": "user", "content": query})
+        # 确保用户消息内容就是纯粹的query，去除首尾空白，避免包含其他内容
+        user_message_content = query.strip()
         
-        # 显示用户消息
+        # 添加用户消息到消息列表（保存纯粹的用户输入内容）
+        current_window["messages"].append({"role": "user", "content": user_message_content})
+        
+        # 立即显示用户消息（让用户看到自己的输入）
         with st.chat_message("user"):
-            st.write(query)
+            st.write(user_message_content)
         
         # 显示加载提示
         with st.chat_message("assistant"):
             with st.spinner("正在思考中..."):
                 # Step 1: NER 实体识别
+                # 注意：使用user_message_content而不是query，确保使用的是纯粹的用户输入
                 entities = []
                 try:
                     ner_model = get_ner_model()
-                    entities = ner_model.extract_entities(query)
+                    entities = ner_model.extract_entities(user_message_content)
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
@@ -498,7 +503,7 @@ def main_page():
                             top_k=top_k, 
                             similarity_threshold=similarity_threshold,
                             enable_rerank=enable_rerank,
-                            query=query,  # 传入用户查询用于rerank
+                            query=user_message_content,  # 传入纯粹的用户查询用于rerank，避免包含机器人回复
                             rerank_top_n=rerank_top_n,
                             rerank_threshold=rerank_threshold
                         )
@@ -511,9 +516,10 @@ def main_page():
                 kg_content = format_kg_content(kg_results) if kg_results else ""
                 
                 # Step 4: 调用 Dify 工作流/聊天 API
+                # 注意：使用user_message_content而不是query，确保传递的是纯粹的用户输入，不会包含机器人回复
                 conversation_id = current_window.get("conversation_id")
                 result, err = call_workflow(
-                    query, 
+                    user_message_content, 
                     st.session_state.selected_workflow, 
                     conversation_id, 
                     kg_content=kg_content
@@ -549,24 +555,12 @@ def main_page():
                     
                     current_window["messages"].append(assistant_msg)
                     
-                    # 显示回答
-                    st.write(answer)
+                    # 注意：不在这里立即显示助手回复，而是通过 st.rerun() 后由上面的消息历史循环统一显示
+                    # 这样可以确保消息按正确顺序显示，避免多轮对话时消息混乱和重复显示的问题
                     
-                    # 显示实体识别结果
-                    if entities:
-                        display_entities(entities)
-                    
-                    # 显示知识图谱检索结果
-                    if kg_results:
-                        display_kg_results(kg_results)
-                    
-                    # 管理员可以看到工作流和原始响应
-                    if st.session_state.is_admin:
-                        st.caption(f"工作流: {st.session_state.selected_workflow}")
-                        
-                        if st.session_state.get("show_raw_response") and result:
-                            with st.expander("查看原始响应（管理员）", expanded=False):
-                                st.code(json.dumps(result, ensure_ascii=False, indent=2), language="json")
+        # 重新渲染页面，让消息历史循环统一显示所有消息（包括刚添加的用户消息和助手回复）
+        # 这样可以避免多轮对话时消息显示混乱的问题
+        st.rerun()
 
 
 def main():

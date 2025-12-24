@@ -149,7 +149,7 @@ class TripleReranker:
         对三元组进行重排序，基于查询与三元组的embedding相似度
         
         参考KG-Rank项目中CohereReranker的rerank方法
-        但使用embedding模型计算相似度，而不是调用Cohere API
+        但使用embedding模型计算相似度
         
         Args:
             query: 用户查询文本
