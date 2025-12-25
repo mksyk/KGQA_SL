@@ -4,9 +4,10 @@ Streamlit 版本的智能问答应用
 """
 import json
 import os
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from user_storage import credentials, write_credentials, storage_file, Credentials
 
 # 导入 NER 和 KG 检索模块
@@ -310,36 +311,303 @@ def display_entities(entities):
                 st.caption(f"类型: {entity.get('label', '')}")
 
 
+def convert_kg_results_to_visjs(kg_results: Dict) -> Tuple[List[Dict], List[Dict]]:
+    """
+    将知识图谱检索结果转换为 vis.js 格式的 nodes 和 edges
+    
+    Args:
+        kg_results: 知识图谱检索结果字典
+        
+    Returns:
+        (nodes, edges): vis.js 格式的节点和边列表
+    """
+    nodes = []
+    edges = []
+    node_id_map = {}  # 用于跟踪已添加的节点，避免重复
+    
+    if not kg_results or not kg_results.get("entities"):
+        return nodes, edges
+    
+    node_counter = 0
+    
+    for entity_result in kg_results.get("entities", []):
+        entity_text = entity_result.get("entity_text", "")
+        entity_label = entity_result.get("entity_label", "")
+        matched_nodes = entity_result.get("matched_nodes", [])
+        
+        # 添加实体节点（如果还没有添加）
+        if entity_text and entity_text not in node_id_map:
+            node_id_map[entity_text] = node_counter
+            nodes.append({
+                "id": node_counter,
+                "label": entity_text,
+                "title": f"实体: {entity_text}\n类型: {entity_label}",
+                "group": "entity",
+                "color": {"background": "#FF6B6B", "border": "#C92A2A"},
+                "font": {"size": 16, "bold": True}
+            })
+            node_counter += 1
+        
+        # 添加匹配的节点和关系
+        for node in matched_nodes:
+            node_name = node.get("name", "")
+            similarity = node.get("similarity", 0)
+            relations = node.get("relations", {})
+            
+            # 添加匹配节点（如果还没有添加）
+            if node_name and node_name not in node_id_map:
+                node_id_map[node_name] = node_counter
+                nodes.append({
+                    "id": node_counter,
+                    "label": node_name,
+                    "title": f"节点: {node_name}\n相似度: {similarity:.3f}",
+                    "group": "matched_node",
+                    "color": {"background": "#4ECDC4", "border": "#2D9CDB"},
+                    "font": {"size": 14}
+                })
+                node_counter += 1
+            
+            # 添加从实体到匹配节点的边
+            if entity_text and node_name:
+                entity_id = node_id_map.get(entity_text)
+                node_id = node_id_map.get(node_name)
+                if entity_id is not None and node_id is not None:
+                    edge_key = f"{entity_id}-{node_id}"
+                    if edge_key not in [f"{e['from']}-{e['to']}" for e in edges]:
+                        edges.append({
+                            "from": entity_id,
+                            "to": node_id,
+                            "label": f"相似度: {similarity:.3f}",
+                            "color": {"color": "#95A5A6"},
+                            "arrows": "to"
+                        })
+            
+            # 添加匹配节点的关系边
+            if relations:
+                for rel_type, neighbors in relations.items():
+                    for neighbor in neighbors:
+                        neighbor_name = neighbor.get("name", "")
+                        if neighbor_name:
+                            # 添加邻居节点（如果还没有添加）
+                            if neighbor_name not in node_id_map:
+                                node_id_map[neighbor_name] = node_counter
+                                nodes.append({
+                                    "id": node_counter,
+                                    "label": neighbor_name,
+                                    "title": f"节点: {neighbor_name}",
+                                    "group": "neighbor",
+                                    "color": {"background": "#95E1D3", "border": "#6C5CE7"},
+                                    "font": {"size": 12}
+                                })
+                                node_counter += 1
+                            
+                            # 添加关系边
+                            from_id = node_id_map.get(node_name)
+                            to_id = node_id_map.get(neighbor_name)
+                            if from_id is not None and to_id is not None:
+                                edge_key = f"{from_id}-{to_id}-{rel_type}"
+                                if edge_key not in [f"{e['from']}-{e['to']}-{e.get('label', '')}" for e in edges]:
+                                    edges.append({
+                                        "from": from_id,
+                                        "to": to_id,
+                                        "label": rel_type,
+                                        "color": {"color": "#A8E6CF"},
+                                        "arrows": "to"
+                                    })
+    
+    return nodes, edges
+
+
+def render_kg_graph(nodes: List[Dict], edges: List[Dict], height: int = 500) -> str:
+    """
+    生成用于渲染知识图谱的 HTML/JavaScript 代码
+    
+    Args:
+        nodes: vis.js 格式的节点列表
+        edges: vis.js 格式的边列表
+        height: 图谱高度（像素）
+        
+    Returns:
+        HTML 字符串
+    """
+    # 将数据转换为 JSON 字符串
+    nodes_json = json.dumps(nodes, ensure_ascii=False)
+    edges_json = json.dumps(edges, ensure_ascii=False)
+    
+    html_template = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+        <style>
+            body {{
+                margin: 0;
+                padding: 0;
+                font-family: Arial, sans-serif;
+            }}
+            #kg-graph-container {{
+                width: 100%;
+                height: {height}px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+            }}
+        </style>
+    </head>
+    <body>
+        <div id="kg-graph-container"></div>
+        <script type="text/javascript">
+            // 节点和边数据
+            var nodes = new vis.DataSet({nodes_json});
+            var edges = new vis.DataSet({edges_json});
+            
+            // 创建网络图
+            var container = document.getElementById('kg-graph-container');
+            var data = {{
+                nodes: nodes,
+                edges: edges
+            }};
+            
+            var options = {{
+                nodes: {{
+                    shape: 'dot',
+                    size: 20,
+                    font: {{
+                        size: 14,
+                        face: 'Arial'
+                    }},
+                    borderWidth: 2,
+                    shadow: true
+                }},
+                edges: {{
+                    width: 2,
+                    font: {{
+                        size: 12,
+                        align: 'middle'
+                    }},
+                    arrows: {{
+                        to: {{
+                            enabled: true,
+                            scaleFactor: 1.2
+                        }}
+                    }},
+                    smooth: {{
+                        type: 'continuous',
+                        roundness: 0.5
+                    }},
+                    shadow: true
+                }},
+                physics: {{
+                    enabled: true,
+                    stabilization: {{
+                        enabled: true,
+                        iterations: 200
+                    }},
+                    barnesHut: {{
+                        gravitationalConstant: -2000,
+                        centralGravity: 0.1,
+                        springLength: 200,
+                        springConstant: 0.04,
+                        damping: 0.09
+                    }}
+                }},
+                interaction: {{
+                    hover: true,
+                    tooltipDelay: 200,
+                    zoomView: true,
+                    dragView: true
+                }},
+                layout: {{
+                    improvedLayout: true,
+                    hierarchical: {{
+                        enabled: false
+                    }}
+                }}
+            }};
+            
+            var network = new vis.Network(container, data, options);
+            
+            // 添加交互事件
+            network.on("click", function (params) {{
+                if (params.nodes.length > 0) {{
+                    var nodeId = params.nodes[0];
+                    var node = nodes.get(nodeId);
+                    if (node) {{
+                        console.log("点击节点:", node.label);
+                    }}
+                }}
+            }});
+        </script>
+    </body>
+    </html>
+    """
+    
+    return html_template
+
+
 def display_kg_results(kg_results):
-    """显示知识图谱检索结果"""
+    """显示知识图谱检索结果（支持文本和图形两种显示方式）"""
     if not kg_results or not kg_results.get("entities"):
         return
     
     total_matched = kg_results.get("total_matched", 0)
     with st.expander(f"知识图谱检索结果 ({total_matched} 个实体匹配)", expanded=False):
-        for entity_result in kg_results["entities"]:
-            entity_text = entity_result.get("entity_text", "")
-            entity_label = entity_result.get("entity_label", "")
-            matched_nodes = entity_result.get("matched_nodes", [])
+        # 添加显示方式切换
+        display_mode = st.radio(
+            "显示方式",
+            ["文本列表", "图谱可视化"],
+            horizontal=True,
+            key="kg_display_mode"
+        )
+        
+        if display_mode == "图谱可视化":
+            # 转换为 vis.js 格式
+            nodes, edges = convert_kg_results_to_visjs(kg_results)
             
-            if matched_nodes:
-                st.markdown(f"**实体：{entity_text}** ({entity_label})")
+            if nodes and edges:
+                # 显示图谱统计信息
+                st.info(f"📊 图谱包含 {len(nodes)} 个节点，{len(edges)} 条关系")
                 
-                for node in matched_nodes:
-                    node_name = node.get("name", "")
-                    similarity = node.get("similarity", 0)
-                    relations = node.get("relations", {})
+                # 渲染图谱
+                html_content = render_kg_graph(nodes, edges, height=500)
+                st.components.v1.html(html_content, height=520)
+                
+                # 显示图例
+                with st.container():
+                    st.markdown("**图例：**")
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.markdown("🔴 **红色节点**: 查询实体")
+                    with col2:
+                        st.markdown("🔵 **蓝色节点**: 匹配节点")
+                    with col3:
+                        st.markdown("🟢 **绿色节点**: 关联节点")
+            else:
+                st.warning("⚠️ 无法生成图谱：没有可用的节点或关系数据")
+        else:
+            # 原有的文本列表显示方式
+            for entity_result in kg_results["entities"]:
+                entity_text = entity_result.get("entity_text", "")
+                entity_label = entity_result.get("entity_label", "")
+                matched_nodes = entity_result.get("matched_nodes", [])
+                
+                if matched_nodes:
+                    st.markdown(f"**实体：{entity_text}** ({entity_label})")
                     
-                    with st.container():
-                        st.markdown(f"- **{node_name}** (相似度: {similarity:.3f})")
+                    for node in matched_nodes:
+                        node_name = node.get("name", "")
+                        similarity = node.get("similarity", 0)
+                        relations = node.get("relations", {})
                         
-                        if relations:
-                            for rel_type, neighbors in relations.items():
-                                neighbor_names = [n.get("name", "") for n in neighbors if n.get("name")]
-                                if neighbor_names:
-                                    st.markdown(f"  - {rel_type}: {', '.join(neighbor_names)}")
-                
-                st.markdown("---")
+                        with st.container():
+                            st.markdown(f"- **{node_name}** (相似度: {similarity:.3f})")
+                            
+                            if relations:
+                                for rel_type, neighbors in relations.items():
+                                    neighbor_names = [n.get("name", "") for n in neighbors if n.get("name")]
+                                    if neighbor_names:
+                                        st.markdown(f"  - {rel_type}: {', '.join(neighbor_names)}")
+                    
+                    st.markdown("---")
 
 
 def main_page():
