@@ -32,3 +32,15 @@ KG_RERANK_TOP_N = int(os.environ.get("KG_RERANK_TOP_N", "5"))  # rerank后每个
 KG_RERANK_THRESHOLD = float(os.environ.get("KG_RERANK_THRESHOLD", "0.0"))  # rerank相似度阈值
 KG_RERANK_MODEL = os.environ.get("KG_RERANK_MODEL", "bge-m3")  # rerank使用的embedding模型名称
 
+# G-Retriever配置
+G_RETRIEVER_ENABLED = True  # 是否启用G-Retriever
+G_RETRIEVER_TOPK_NODES = int(os.environ.get("G_RETRIEVER_TOPK_NODES", "3"))  # PCST算法选择的top-k节点数量
+G_RETRIEVER_TOPK_EDGES = int(os.environ.get("G_RETRIEVER_TOPK_EDGES", "5"))  # PCST算法选择的top-k边数量
+G_RETRIEVER_COST_EDGE = float(os.environ.get("G_RETRIEVER_COST_EDGE", "0.5"))  # PCST算法中边的成本参数
+G_RETRIEVER_INITIAL_TOP_K = int(os.environ.get("G_RETRIEVER_INITIAL_TOP_K", "10"))  # 初始检索的节点数量
+G_RETRIEVER_MAX_HOP = int(os.environ.get("G_RETRIEVER_MAX_HOP", "2"))  # 最大跳数
+G_RETRIEVER_SIMILARITY_THRESHOLD = float(os.environ.get("G_RETRIEVER_SIMILARITY_THRESHOLD", "0.3"))  # G-Retriever相似度阈值（默认0.3，比传统KG检索的0.5更宽松）
+
+# 应用配置
+ENABLE_LOGIN = False  # 是否启用登录界面（设为false可直接进入聊天界面，方便测试）
+

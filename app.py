@@ -9,11 +9,23 @@ import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from user_storage import credentials, write_credentials, storage_file, Credentials
+import logging
+
+# 设置 logger
+logger = logging.getLogger(__name__)
 
 # 导入 NER 和 KG 检索模块
 from ner_module import get_ner_model
 from kg_retriever import get_kg_retriever
 import config as app_config
+
+# 导入 G-Retriever 模块（可选）
+try:
+    from G_retriever.utils import get_g_retriever
+    G_RETRIEVER_AVAILABLE = True
+except ImportError as e:
+    G_RETRIEVER_AVAILABLE = False
+    logger.warning(f"G-Retriever模块未正确导入，将使用传统KG检索方式: {e}")
 
 
 # Dify API 配置 - 可以配置多个工作流
@@ -311,6 +323,85 @@ def display_entities(entities):
                 st.caption(f"类型: {entity.get('label', '')}")
 
 
+def convert_subgraph_to_visjs(subgraph_result: Dict) -> Tuple[List[Dict], List[Dict]]:
+    """
+    将G-retriever返回的子图结果转换为 vis.js 格式的 nodes 和 edges
+    
+    Args:
+        subgraph_result: G-retriever返回的子图结果字典
+        
+    Returns:
+        (nodes, edges): vis.js 格式的节点和边列表
+    """
+    nodes = []
+    edges = []
+    
+    if not subgraph_result or not subgraph_result.get("nodes"):
+        return nodes, edges
+    
+    subgraph_nodes = subgraph_result.get("nodes", [])
+    subgraph_edges = subgraph_result.get("edges", [])
+    
+    # 创建节点映射（从节点索引到vis.js id）
+    node_index_to_id = {}
+    node_counter = 0
+    
+    for node in subgraph_nodes:
+        node_index = node.get("index", node_counter)
+        node_name = node.get("name", f"节点{node_index}")
+        node_labels = node.get("labels", [])
+        
+        node_id = node_counter
+        node_index_to_id[node_index] = node_id
+        
+        # 确定节点颜色和样式
+        node_group = "subgraph_node"
+        node_color = {"background": "#4ECDC4", "border": "#2D9CDB"}
+        
+        nodes.append({
+            "id": node_id,
+            "label": node_name[:20] + "..." if len(node_name) > 20 else node_name,  # 限制标签长度
+            "title": f"节点: {node_name}\n类型: {', '.join(node_labels)}",
+            "group": node_group,
+            "color": node_color,
+            "font": {"size": 14}
+        })
+        node_counter += 1
+    
+    # 添加边
+    matched_edges = 0
+    unmatched_edges = 0
+    for edge in subgraph_edges:
+        src_index = edge.get("src_index")
+        dst_index = edge.get("dst_index")
+        rel_type = edge.get("rel_type", "RELATED_TO")
+        
+        src_id = node_index_to_id.get(src_index)
+        dst_id = node_index_to_id.get(dst_index)
+        
+        if src_id is not None and dst_id is not None:
+            edges.append({
+                "from": src_id,
+                "to": dst_id,
+                "label": rel_type,
+                "color": {"color": "#6C5CE7"},
+                "arrows": "to",
+                "font": {"size": 10}
+            })
+            matched_edges += 1
+        else:
+            unmatched_edges += 1
+            if unmatched_edges <= 5:  # 只记录前5个未匹配的边
+                logger.debug(f"边未匹配: src_index={src_index}, dst_index={dst_index}, src_id={src_id}, dst_id={dst_id}")
+    
+    if unmatched_edges > 0:
+        logger.warning(f"有 {unmatched_edges} 条边无法匹配到节点（共 {len(subgraph_edges)} 条边）")
+    
+    logger.info(f"子图转换完成: {len(nodes)} 个节点, {len(edges)} 条边（匹配成功: {matched_edges}, 未匹配: {unmatched_edges}）")
+    
+    return nodes, edges
+
+
 def convert_kg_results_to_visjs(kg_results: Dict) -> Tuple[List[Dict], List[Dict]]:
     """
     将知识图谱检索结果转换为 vis.js 格式的 nodes 和 edges
@@ -544,70 +635,134 @@ def render_kg_graph(nodes: List[Dict], edges: List[Dict], height: int = 500) -> 
     return html_template
 
 
-def display_kg_results(kg_results):
-    """显示知识图谱检索结果（支持文本和图形两种显示方式）"""
-    if not kg_results or not kg_results.get("entities"):
-        return
+def display_kg_results(kg_results, subgraph_result=None, message_idx=None):
+    """
+    显示知识图谱检索结果（支持文本和图形两种显示方式）
     
-    total_matched = kg_results.get("total_matched", 0)
-    with st.expander(f"知识图谱检索结果 ({total_matched} 个实体匹配)", expanded=False):
-        # 添加显示方式切换
-        display_mode = st.radio(
-            "显示方式",
-            ["文本列表", "图谱可视化"],
-            horizontal=True,
-            key="kg_display_mode"
-        )
+    Args:
+        kg_results: 传统KG检索结果
+        subgraph_result: G-retriever返回的子图结果（可选）
+        message_idx: 消息索引，用于生成唯一的key（可选）
+    """
+    # 生成唯一的key后缀
+    key_suffix = f"_{message_idx}" if message_idx is not None else ""
+    
+    # 优先显示子图结果
+    if subgraph_result and subgraph_result.get("nodes"):
+        subgraph_info = subgraph_result.get("subgraph_info", {})
+        num_nodes = subgraph_info.get("num_nodes", 0)
+        num_edges = subgraph_info.get("num_edges", 0)
         
-        if display_mode == "图谱可视化":
-            # 转换为 vis.js 格式
-            nodes, edges = convert_kg_results_to_visjs(kg_results)
+        with st.expander(f"G-Retriever子图结果 ({num_nodes} 个节点, {num_edges} 条边)", expanded=False):
+            # 添加显示方式切换，使用唯一的key
+            display_mode = st.radio(
+                "显示方式",
+                ["文本列表", "图谱可视化"],
+                horizontal=True,
+                key=f"subgraph_display_mode{key_suffix}"
+            )
             
-            if nodes and edges:
-                # 显示图谱统计信息
-                st.info(f"📊 图谱包含 {len(nodes)} 个节点，{len(edges)} 条关系")
+            if display_mode == "图谱可视化":
+                # 转换为 vis.js 格式
+                nodes, edges = convert_subgraph_to_visjs(subgraph_result)
                 
-                # 渲染图谱
-                html_content = render_kg_graph(nodes, edges, height=500)
-                st.components.v1.html(html_content, height=520)
-                
-                # 显示图例
-                with st.container():
-                    st.markdown("**图例：**")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.markdown("🔴 **红色节点**: 查询实体")
-                    with col2:
-                        st.markdown("🔵 **蓝色节点**: 匹配节点")
-                    with col3:
-                        st.markdown("🟢 **绿色节点**: 关联节点")
+                if nodes and edges:
+                    # 显示图谱统计信息
+                    st.info(f"📊 PCST子图包含 {len(nodes)} 个节点，{len(edges)} 条关系")
+                    
+                    # 渲染图谱
+                    html_content = render_kg_graph(nodes, edges, height=600)
+                    st.components.v1.html(html_content, height=620)
+                    
+                    # 显示图例
+                    with st.container():
+                        st.markdown("**图例：**")
+                        st.markdown("🔵 **蓝色节点**: PCST算法选中的节点")
+                        st.markdown("🟣 **紫色边**: 选中的关系")
+                else:
+                    st.warning("⚠️ 无法生成图谱：没有可用的节点或关系数据")
             else:
-                st.warning("⚠️ 无法生成图谱：没有可用的节点或关系数据")
-        else:
-            # 原有的文本列表显示方式
-            for entity_result in kg_results["entities"]:
-                entity_text = entity_result.get("entity_text", "")
-                entity_label = entity_result.get("entity_label", "")
-                matched_nodes = entity_result.get("matched_nodes", [])
+                # 文本列表显示方式
+                nodes = subgraph_result.get("nodes", [])
+                edges = subgraph_result.get("edges", [])
                 
-                if matched_nodes:
-                    st.markdown(f"**实体：{entity_text}** ({entity_label})")
+                st.markdown("### 子图节点")
+                for node in nodes:
+                    node_name = node.get("name", "")
+                    node_labels = node.get("labels", [])
+                    st.markdown(f"- **{node_name}** ({', '.join(node_labels)})")
+                
+                st.markdown("### 子图关系")
+                for edge in edges:
+                    src_idx = edge.get("src_index")
+                    dst_idx = edge.get("dst_index")
+                    rel_type = edge.get("rel_type", "")
+                    src_node = nodes[src_idx] if src_idx < len(nodes) else None
+                    dst_node = nodes[dst_idx] if dst_idx < len(nodes) else None
+                    if src_node and dst_node:
+                        st.markdown(f"- {src_node.get('name', '')} --[{rel_type}]--> {dst_node.get('name', '')}")
+    
+    # 显示传统KG检索结果
+    if kg_results and kg_results.get("entities"):
+        total_matched = kg_results.get("total_matched", 0)
+        with st.expander(f"知识图谱检索结果 ({total_matched} 个实体匹配)", expanded=False):
+            # 添加显示方式切换，使用唯一的key
+            display_mode = st.radio(
+                "显示方式",
+                ["文本列表", "图谱可视化"],
+                horizontal=True,
+                key=f"kg_display_mode{key_suffix}"
+            )
+            
+            if display_mode == "图谱可视化":
+                # 转换为 vis.js 格式
+                nodes, edges = convert_kg_results_to_visjs(kg_results)
+                
+                if nodes and edges:
+                    # 显示图谱统计信息
+                    st.info(f"📊 图谱包含 {len(nodes)} 个节点，{len(edges)} 条关系")
                     
-                    for node in matched_nodes:
-                        node_name = node.get("name", "")
-                        similarity = node.get("similarity", 0)
-                        relations = node.get("relations", {})
+                    # 渲染图谱
+                    html_content = render_kg_graph(nodes, edges, height=500)
+                    st.components.v1.html(html_content, height=520)
+                    
+                    # 显示图例
+                    with st.container():
+                        st.markdown("**图例：**")
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.markdown("🔴 **红色节点**: 查询实体")
+                        with col2:
+                            st.markdown("🔵 **蓝色节点**: 匹配节点")
+                        with col3:
+                            st.markdown("🟢 **绿色节点**: 关联节点")
+                else:
+                    st.warning("⚠️ 无法生成图谱：没有可用的节点或关系数据")
+            else:
+                # 原有的文本列表显示方式
+                for entity_result in kg_results["entities"]:
+                    entity_text = entity_result.get("entity_text", "")
+                    entity_label = entity_result.get("entity_label", "")
+                    matched_nodes = entity_result.get("matched_nodes", [])
+                    
+                    if matched_nodes:
+                        st.markdown(f"**实体：{entity_text}** ({entity_label})")
                         
-                        with st.container():
-                            st.markdown(f"- **{node_name}** (相似度: {similarity:.3f})")
+                        for node in matched_nodes:
+                            node_name = node.get("name", "")
+                            similarity = node.get("similarity", 0)
+                            relations = node.get("relations", {})
                             
-                            if relations:
-                                for rel_type, neighbors in relations.items():
-                                    neighbor_names = [n.get("name", "") for n in neighbors if n.get("name")]
-                                    if neighbor_names:
-                                        st.markdown(f"  - {rel_type}: {', '.join(neighbor_names)}")
-                    
-                    st.markdown("---")
+                            with st.container():
+                                st.markdown(f"- **{node_name}** (相似度: {similarity:.3f})")
+                                
+                                if relations:
+                                    for rel_type, neighbors in relations.items():
+                                        neighbor_names = [n.get("name", "") for n in neighbors if n.get("name")]
+                                        if neighbor_names:
+                                            st.markdown(f"  - {rel_type}: {', '.join(neighbor_names)}")
+                        
+                        st.markdown("---")
 
 
 def main_page():
@@ -711,9 +866,11 @@ def main_page():
                     if msg.get("entities"):
                         display_entities(msg["entities"])
                     
-                    # 显示知识图谱检索结果
-                    if msg.get("kg_results"):
-                        display_kg_results(msg["kg_results"])
+                    # 显示知识图谱检索结果（支持传统KG检索和G-Retriever子图）
+                    if msg.get("kg_results") or msg.get("subgraph_result"):
+                        # 使用消息索引生成唯一的key
+                        msg_idx = messages.index(msg)
+                        display_kg_results(msg.get("kg_results"), msg.get("subgraph_result"), message_idx=msg_idx)
                     
                     # 管理员可以看到工作流和原始响应
                     if st.session_state.is_admin:
@@ -728,7 +885,8 @@ def main_page():
     # 输入区域
     query = st.chat_input("输入您的问题...")
     
-    if query:
+    # 确保query是有效的非空字符串，避免表单提交等事件导致的误触发
+    if query and query.strip():
         # 确保用户消息内容就是纯粹的query，去除首尾空白，避免包含其他内容
         user_message_content = query.strip()
         
@@ -739,92 +897,282 @@ def main_page():
         with st.chat_message("user"):
             st.write(user_message_content)
         
-        # 显示加载提示
+        # 显示分步骤处理过程
         with st.chat_message("assistant"):
-            with st.spinner("正在思考中..."):
-                # Step 1: NER 实体识别
-                # 注意：使用user_message_content而不是query，确保使用的是纯粹的用户输入
-                entities = []
-                try:
-                    ner_model = get_ner_model()
-                    entities = ner_model.extract_entities(user_message_content)
-                except Exception as e:
-                    import traceback
-                    traceback.print_exc()
-                    # NER 失败不影响后续流程，继续执行
-                
-                # Step 2: 知识图谱检索
-                kg_results = {}
-                if entities:
+            # 创建步骤状态容器
+            step1_container = st.empty()
+            step2_container = st.empty()
+            step3_container = st.empty()
+            step4_container = st.empty()
+            
+            # Step 1: NER 实体识别
+            with step1_container.container():
+                with st.spinner("🔍 步骤 1/4: 正在进行实体识别..."):
+                    entities = []
                     try:
-                        top_k = app_config.KG_TOP_K
-                        similarity_threshold = app_config.KG_SIMILARITY_THRESHOLD
-                        
-                        # 获取rerank配置
-                        enable_rerank = app_config.KG_ENABLE_RERANK
-                        rerank_top_n = app_config.KG_RERANK_TOP_N
-                        rerank_threshold = app_config.KG_RERANK_THRESHOLD
-                        
-                        kg_retriever = get_kg_retriever()
-                        kg_results = kg_retriever.retrieve_knowledge(
-                            entities, 
-                            top_k=top_k, 
-                            similarity_threshold=similarity_threshold,
-                            enable_rerank=enable_rerank,
-                            query=user_message_content,  # 传入纯粹的用户查询用于rerank，避免包含机器人回复
-                            rerank_top_n=rerank_top_n,
-                            rerank_threshold=rerank_threshold
-                        )
+                        ner_model = get_ner_model()
+                        entities = ner_model.extract_entities(user_message_content)
+                        logger.info(f"NER识别完成，识别到 {len(entities)} 个实体")
                     except Exception as e:
                         import traceback
                         traceback.print_exc()
-                        # KG 检索失败不影响后续流程，继续执行
+                        logger.error(f"NER识别失败: {e}")
+                        # NER 失败不影响后续流程，继续执行
                 
-                # Step 3: 格式化知识图谱内容
-                kg_content = format_kg_content(kg_results) if kg_results else ""
-                
-                # Step 4: 调用 Dify 工作流/聊天 API
-                # 注意：使用user_message_content而不是query，确保传递的是纯粹的用户输入，不会包含机器人回复
-                conversation_id = current_window.get("conversation_id")
-                result, err = call_workflow(
-                    user_message_content, 
-                    st.session_state.selected_workflow, 
-                    conversation_id, 
-                    kg_content=kg_content
-                )
-                
-                if err:
-                    answer = f"错误：{err}"
+                # 更新步骤1状态并显示结果
+                st.success(f"✅ 步骤 1/4: 实体识别完成（识别到 {len(entities)} 个实体）")
+                if entities:
+                    display_entities(entities)
                 else:
-                    # 从响应中提取 conversation_id
-                    if isinstance(result, dict):
-                        new_conversation_id = (
-                            result.get("conversation_id") or 
-                            result.get("data", {}).get("conversation_id") or
-                            conversation_id
-                        )
-                        if new_conversation_id:
-                            current_window["conversation_id"] = new_conversation_id
+                    st.caption("未识别到实体")
+            
+            # Step 2: 知识图谱检索
+            # 使用session_state保存步骤2的结果，避免切换显示方式时丢失状态
+            step2_key = f"step2_result_{len(current_window['messages'])}"
+            
+            with step2_container.container():
+                # 如果已经检索过，直接使用缓存的结果
+                if step2_key in st.session_state:
+                    cached_result = st.session_state[step2_key]
+                    use_g_retriever = cached_result["use_g_retriever"]
+                    kg_results = cached_result["kg_results"]
+                    subgraph_result = cached_result["subgraph_result"]
+                    step2_status = cached_result["status"]
                     
-                    answer = extract_display_text(result)
+                    # 显示步骤状态（始终显示，不会因为切换而消失）
+                    if step2_status["type"] == "success":
+                        st.success(step2_status["message"])
+                    elif step2_status["type"] == "warning":
+                        st.warning(step2_status["message"])
+                    else:
+                        st.error(step2_status["message"])
                     
-                    # 保存助手回复
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": answer,
-                        "workflow": st.session_state.selected_workflow,
-                        "entities": entities,
-                        "kg_results": kg_results,
-                    }
+                    # 显示结果（可以切换显示方式）
+                    # 使用当前消息索引生成唯一的key
+                    current_msg_idx = len(current_window['messages'])
+                    if use_g_retriever and subgraph_result:
+                        display_kg_results(None, subgraph_result, message_idx=current_msg_idx)
+                    elif kg_results and kg_results.get("entities"):
+                        display_kg_results(kg_results, None, message_idx=current_msg_idx)
+                else:
+                    # 首次执行检索
+                    with st.spinner("📚 步骤 2/4: 正在检索知识图谱..."):
+                        kg_results = {}
+                        subgraph_result = None
+                        
+                        # 根据配置选择使用G-Retriever还是传统KG检索
+                        use_g_retriever = app_config.G_RETRIEVER_ENABLED and G_RETRIEVER_AVAILABLE
+                        
+                        if use_g_retriever:
+                            # 使用G-Retriever构建子图
+                            try:
+                                g_retriever = get_g_retriever()
+                                logger.info(f"开始G-Retriever检索，查询: {user_message_content[:50]}...")
+                                subgraph_result = g_retriever.build_subgraph(
+                                    query=user_message_content,
+                                    top_k=app_config.G_RETRIEVER_INITIAL_TOP_K,
+                                    max_hop=app_config.G_RETRIEVER_MAX_HOP
+                                )
+                                num_nodes = subgraph_result.get("subgraph_info", {}).get("num_nodes", 0)
+                                num_edges = subgraph_result.get("subgraph_info", {}).get("num_edges", 0)
+                                logger.info(f"G-Retriever子图构建完成: {num_nodes} 个节点, {num_edges} 条边")
+                                
+                                # 如果检索结果为0，记录警告并回退到传统KG检索
+                                if num_nodes == 0 and num_edges == 0:
+                                    logger.warning("G-Retriever检索结果为0，回退到传统KG检索")
+                                    use_g_retriever = False
+                                    subgraph_result = None
+                            except Exception as e:
+                                import traceback
+                                traceback.print_exc()
+                                logger.error(f"G-Retriever构建子图失败: {e}")
+                                # 失败时回退到传统KG检索
+                                use_g_retriever = False
+                                subgraph_result = None
+                        
+                        if not use_g_retriever and entities:
+                            # 使用传统KG检索
+                            try:
+                                top_k = app_config.KG_TOP_K
+                                similarity_threshold = app_config.KG_SIMILARITY_THRESHOLD
+                                
+                                # 获取rerank配置
+                                enable_rerank = app_config.KG_ENABLE_RERANK
+                                rerank_top_n = app_config.KG_RERANK_TOP_N
+                                rerank_threshold = app_config.KG_RERANK_THRESHOLD
+                                
+                                kg_retriever = get_kg_retriever()
+                                kg_results = kg_retriever.retrieve_knowledge(
+                                    entities, 
+                                    top_k=top_k, 
+                                    similarity_threshold=similarity_threshold,
+                                    enable_rerank=enable_rerank,
+                                    query=user_message_content,  # 传入纯粹的用户查询用于rerank，避免包含机器人回复
+                                    rerank_top_n=rerank_top_n,
+                                    rerank_threshold=rerank_threshold
+                                )
+                                logger.info("传统KG检索完成")
+                            except Exception as e:
+                                import traceback
+                                traceback.print_exc()
+                                logger.error(f"KG检索失败: {e}")
+                                # KG 检索失败不影响后续流程，继续执行
                     
-                    # 管理员可以看到原始响应
-                    if st.session_state.is_admin:
-                        assistant_msg["raw_response"] = result
+                    # 更新步骤2状态并显示结果
+                    if use_g_retriever and subgraph_result:
+                        subgraph_info = subgraph_result.get("subgraph_info", {})
+                        num_nodes = subgraph_info.get("num_nodes", 0)
+                        num_edges = subgraph_info.get("num_edges", 0)
+                        status_message = f"✅ 步骤 2/4: 知识图谱检索完成（G-Retriever: {num_nodes} 个节点, {num_edges} 条边）"
+                        st.success(status_message)
+                        
+                        # 保存到session_state
+                        st.session_state[step2_key] = {
+                            "use_g_retriever": use_g_retriever,
+                            "kg_results": kg_results,
+                            "subgraph_result": subgraph_result,
+                            "status": {"type": "success", "message": status_message}
+                        }
+                        
+                        # 使用当前消息索引生成唯一的key
+                        current_msg_idx = len(current_window['messages'])
+                        display_kg_results(None, subgraph_result, message_idx=current_msg_idx)
+                    elif kg_results and kg_results.get("entities"):
+                        total_matched = kg_results.get("total_matched", 0)
+                        status_message = f"✅ 步骤 2/4: 知识图谱检索完成（{total_matched} 个实体匹配）"
+                        st.success(status_message)
+                        
+                        # 保存到session_state
+                        st.session_state[step2_key] = {
+                            "use_g_retriever": use_g_retriever,
+                            "kg_results": kg_results,
+                            "subgraph_result": subgraph_result,
+                            "status": {"type": "success", "message": status_message}
+                        }
+                        
+                        # 使用当前消息索引生成唯一的key
+                        current_msg_idx = len(current_window['messages'])
+                        display_kg_results(kg_results, None, message_idx=current_msg_idx)
+                    else:
+                        status_message = "⚠️ 步骤 2/4: 知识图谱检索完成（未找到相关知识）"
+                        st.warning(status_message)
+                        
+                        # 保存到session_state
+                        st.session_state[step2_key] = {
+                            "use_g_retriever": use_g_retriever,
+                            "kg_results": kg_results,
+                            "subgraph_result": subgraph_result,
+                            "status": {"type": "warning", "message": status_message}
+                        }
+            
+            # Step 3: 格式化知识图谱内容
+            with step3_container.container():
+                with st.spinner("📝 步骤 3/4: 正在格式化知识图谱内容..."):
+                    # 优先使用子图结果，否则使用传统KG检索结果
+                    if subgraph_result and subgraph_result.get("nodes"):
+                        # 格式化子图内容
+                        subgraph_nodes = subgraph_result.get("nodes", [])
+                        subgraph_edges = subgraph_result.get("edges", [])
+                        kg_parts = []
+                        kg_parts.append("子图节点:")
+                        for node in subgraph_nodes:
+                            node_name = node.get("name", "")
+                            node_labels = node.get("labels", [])
+                            kg_parts.append(f"  - {node_name} ({', '.join(node_labels)})")
+                        kg_parts.append("\n子图关系:")
+                        for edge in subgraph_edges:
+                            src_idx = edge.get("src_index")
+                            dst_idx = edge.get("dst_index")
+                            rel_type = edge.get("rel_type", "")
+                            src_node = subgraph_nodes[src_idx] if src_idx < len(subgraph_nodes) else None
+                            dst_node = subgraph_nodes[dst_idx] if dst_idx < len(subgraph_nodes) else None
+                            if src_node and dst_node:
+                                kg_parts.append(f"  - {src_node.get('name', '')} --[{rel_type}]--> {dst_node.get('name', '')}")
+                        kg_content = "\n".join(kg_parts)
+                    else:
+                        kg_content = format_kg_content(kg_results) if kg_results else ""
+                
+                # 更新步骤3状态
+                if kg_content:
+                    st.success("✅ 步骤 3/4: 知识图谱内容格式化完成")
+                    with st.expander("查看格式化后的知识图谱内容", expanded=False):
+                        st.text(kg_content[:500] + "..." if len(kg_content) > 500 else kg_content)
+                        if len(kg_content) > 500:
+                            st.caption(f"（内容已截断，完整内容长度: {len(kg_content)} 字符）")
+                else:
+                    st.warning("⚠️ 步骤 3/4: 知识图谱内容格式化完成（无内容需要格式化）")
+            
+            # Step 4: 调用 Dify 工作流/聊天 API
+            with step4_container.container():
+                with st.spinner("🤖 步骤 4/4: 正在调用AI工作流生成答案..."):
+                    # 注意：使用user_message_content而不是query，确保传递的是纯粹的用户输入，不会包含机器人回复
+                    conversation_id = current_window.get("conversation_id")
+                    result, err = call_workflow(
+                        user_message_content, 
+                        st.session_state.selected_workflow, 
+                        conversation_id, 
+                        kg_content=kg_content
+                    )
                     
-                    current_window["messages"].append(assistant_msg)
+                    if err:
+                        answer = f"错误：{err}"
+                    else:
+                        # 从响应中提取 conversation_id
+                        if isinstance(result, dict):
+                            new_conversation_id = (
+                                result.get("conversation_id") or 
+                                result.get("data", {}).get("conversation_id") or
+                                conversation_id
+                            )
+                            if new_conversation_id:
+                                current_window["conversation_id"] = new_conversation_id
+                        
+                        answer = extract_display_text(result)
+                        
+                        # 保存助手回复
+                        assistant_msg = {
+                            "role": "assistant",
+                            "content": answer,
+                            "workflow": st.session_state.selected_workflow,
+                            "entities": entities,
+                            "kg_results": kg_results,
+                            "subgraph_result": subgraph_result,  # 添加子图结果
+                        }
+                        
+                        # 管理员可以看到原始响应
+                        if st.session_state.is_admin:
+                            assistant_msg["raw_response"] = result
+                        
+                        current_window["messages"].append(assistant_msg)
+                
+                # 更新步骤4状态并显示最终答案
+                st.success("✅ 步骤 4/4: AI工作流处理完成")
+                st.markdown("---")
+                st.markdown("### 💡 最终答案")
+                if err:
+                    st.error(answer)
+                else:
+                    st.write(answer)
+                
+                # 综合信息汇总（折叠显示，避免重复）
+                with st.expander("📋 查看综合信息（实体识别 + 知识图谱检索）", expanded=False):
+                    if entities:
+                        st.markdown("#### 实体识别结果")
+                        display_entities(entities)
                     
-                    # 注意：不在这里立即显示助手回复，而是通过 st.rerun() 后由上面的消息历史循环统一显示
-                    # 这样可以确保消息按正确顺序显示，避免多轮对话时消息混乱和重复显示的问题
+                    if kg_results or subgraph_result:
+                        st.markdown("#### 知识图谱检索结果")
+                        # 使用当前消息索引生成唯一的key
+                        current_msg_idx = len(current_window['messages'])
+                        display_kg_results(kg_results, subgraph_result, message_idx=current_msg_idx)
+                
+                # 管理员可以看到工作流和原始响应
+                if st.session_state.is_admin:
+                    st.caption(f"工作流: {st.session_state.selected_workflow}")
+                    
+                    if st.session_state.get("show_raw_response") and not err and result:
+                        with st.expander("查看原始响应（管理员）", expanded=False):
+                            st.code(json.dumps(result, ensure_ascii=False, indent=2), language="json")
                     
         # 重新渲染页面，让消息历史循环统一显示所有消息（包括刚添加的用户消息和助手回复）
         # 这样可以避免多轮对话时消息显示混乱的问题
@@ -843,6 +1191,13 @@ def main():
     
     # 初始化 session state
     initialize_session_state()
+    
+    # 如果配置中禁用了登录，则自动登录（方便测试）
+    if not app_config.ENABLE_LOGIN:
+        if not st.session_state.logged_in:
+            st.session_state.logged_in = True
+            st.session_state.username = "test_user"
+            st.session_state.is_admin = False
     
     # 根据登录状态显示不同页面
     if not st.session_state.logged_in:
